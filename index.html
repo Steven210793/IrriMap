@@ -175,6 +175,9 @@ textarea.ctl{min-height:84px;resize:vertical;line-height:1.4}
 .simbar div{flex:1;min-width:0;font-size:14px;line-height:1.3}
 .simbar b{display:block;font-family:var(--f-head);font-size:16px;letter-spacing:.02em}
 .simbar button{flex:none;min-height:44px;border-radius:10px;border:0;background:var(--ink);color:var(--bg);font-weight:600;padding:0 12px}
+.simbar.calib{border-color:#8b5cf6}
+.simbar.calib button{background:#8b5cf6}
+.simbar.calib #calib-exit{background:none;color:var(--ink);padding:0 10px;font-size:18px}
 .sect{background:var(--surface2);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;font-size:15px;line-height:1.4}
 .sect p{margin:0}
 .warn{color:var(--alert);font-size:14px}
@@ -207,6 +210,7 @@ textarea.ctl{min-height:84px;resize:vertical;line-height:1.4}
       <div class="hint" id="hint">Zoome pour voir les numéros · touche un arroseur ou une vanne · appui long pour le déplacer</div>
       <div class="dragchip" id="dragchip" hidden>Glisse puis relâche</div>
       <div class="simbar" id="simbar" hidden><div id="simtxt"></div><button id="simreset">Tout rouvrir</button></div>
+      <div class="simbar calib" id="calibbar" hidden><div id="calibtxt"></div><button id="calib-capture">Capturer</button><button id="calib-exit" aria-label="Quitter le calibrage">✕</button></div>
     </section>
     <section class="view" id="v-holes" hidden></section>
     <section class="view" id="v-list" hidden></section>
@@ -278,15 +282,21 @@ persist();
 function logOf(it){ const e=edits[it.kind][it.id]; return (e&&e.log)||[]; }
 function hasObs(it){ const l=logOf(it); return l.length>0 && !l[l.length-1].fix; }
 let drag=null;
-// per-element GPS-captured position override (Géoloc button), stored separately from edits/x,y
+// per-element GPS-captured position (Géoloc button): pure metadata (lat/lon/accuracy/capturedAt),
+// stored separately from edits/x,y. It never moves the element's plan position — a valve's marker
+// and its connecting pipe stay put; this is only shown on the sheet for reference.
+// Old app versions stored {x,y,capturedAt} here (a plan-position override). Any entry without
+// lat/lon is that old, stale shape — gpsCapture() below ignores it, so it silently stops mattering.
 const POSKEY="irrimap-posov";
 let posOv={}; try{ const raw=localStorage.getItem(POSKEY); if(raw) posOv=JSON.parse(raw)||{}; }catch(e){}
 function persistPosOv(){ try{ localStorage.setItem(POSKEY,JSON.stringify(posOv)); }catch(e){} }
+function gpsCapture(it){ const o=posOv[it.kind+":"+it.id]; return (o && typeof o.lat==="number" && typeof o.lon==="number") ? o : null; }
+function gpsOffsetM(it,o){ const [la,lo]=pxToLL(get(it,"x"),get(it,"y")); const dl=(o.lat-la)*111320, dg=(o.lon-lo)*111320*Math.cos(la*Math.PI/180); return Math.hypot(dl,dg); }
 // leak ("fuite") markers placed on the pipe network by tapping a pipe
 const LEAKKEY="irrimap-leaks";
 let leaks=[]; try{ const raw=localStorage.getItem(LEAKKEY); if(raw) leaks=JSON.parse(raw)||[]; }catch(e){}
 function persistLeaks(){ try{ localStorage.setItem(LEAKKEY,JSON.stringify(leaks)); }catch(e){} }
-function basePos(it){ const o=posOv[it.kind+":"+it.id]; return o ? {x:o.x,y:o.y} : {x:get(it,"x"),y:get(it,"y")}; }
+function basePos(it){ return {x:get(it,"x"),y:get(it,"y")}; }
 function posOf(it){ if(drag&&drag.it===it) return {x:drag.x,y:drag.y}; return basePos(it); }
 const ALL=[...SPR,...VAL];
 try{ navigator.storage&&navigator.storage.persist&&navigator.storage.persist(); }catch(e){}
@@ -362,14 +372,20 @@ const bounds=L.latLngBounds([[-H,0],[0,W]]);
 let selected=null;
 
 /* ---------- geolocation calibration (plan px <-> GPS) ---------- */
-// fit from green-center reference points; lat=A0*x+A1*y+A2, lon=B0*x+B1*y+B2
+// fit from green-center reference points (6 points, all putting greens); lat=A0*x+A1*y+A2, lon=B0*x+B1*y+B2
 const GEO_A=[4.93616168e-09,-3.95941674e-06,4.88522968e+01];
 const GEO_B=[5.92235616e-06,-1.64669469e-07,2.70452825e+00];
-function pxToLL(x,y){ return [GEO_A[0]*x+GEO_A[1]*y+GEO_A[2], GEO_B[0]*x+GEO_B[1]*y+GEO_B[2]]; }
+// "Mode calibrage" can recompute a better-distributed transform from many valve GPS captures and
+// store it here; when present it replaces the hardcoded 6-point one everywhere, with no rebuild needed.
+const GEOCALKEY="irrimap-geocal";
+let geocal=null; try{ const raw=localStorage.getItem(GEOCALKEY); if(raw) geocal=JSON.parse(raw)||null; }catch(e){}
+function persistGeocal(){ try{ if(geocal) localStorage.setItem(GEOCALKEY,JSON.stringify(geocal)); else localStorage.removeItem(GEOCALKEY); }catch(e){} }
+function curGeo(){ return geocal || {A:GEO_A,B:GEO_B}; }
+function pxToLL(x,y){ const {A,B}=curGeo(); return [A[0]*x+A[1]*y+A[2], B[0]*x+B[1]*y+B[2]]; }
 // invert the 2x2 linear part [A0 A1; B0 B1] to go GPS -> px
-const _gdet=GEO_A[0]*GEO_B[1]-GEO_A[1]*GEO_B[0];
-function llToPx(lat,lon){ const dl=lat-GEO_A[2], dg=lon-GEO_B[2];
-  const x=( GEO_B[1]*dl - GEO_A[1]*dg)/_gdet, y=(-GEO_B[0]*dl + GEO_A[0]*dg)/_gdet; return [x,y]; }
+function llToPx(lat,lon){ const {A,B}=curGeo(); const det=A[0]*B[1]-A[1]*B[0];
+  const dl=lat-A[2], dg=lon-B[2];
+  const x=( B[1]*dl - A[1]*dg)/det, y=(-B[0]*dl + A[0]*dg)/det; return [x,y]; }
 let geoActive=false, geoWatchId=null, userPx=null, userAccPx=0, geoFirstFix=true;
 function geoStop(){ geoActive=false; if(geoWatchId!==null) navigator.geolocation.clearWatch(geoWatchId); geoWatchId=null; userPx=null;
   document.getElementById("zgeo").classList.remove("on"); redraw(); }
@@ -385,14 +401,16 @@ function geoStart(){
   {enableHighAccuracy:true,maximumAge:4000,timeout:12000});
 }
 function geoCaptureFor(it){
+  // One-shot GPS capture stored as pure metadata: it never touches the element's plan position
+  // (marker + connecting pipe stay exactly where digitized), only what's shown on its sheet.
   if(!navigator.geolocation){ toast("Géolocalisation non disponible"); return; }
   toast("Recherche du signal GPS…");
   navigator.geolocation.getCurrentPosition(pos=>{
-    const[x,y]=llToPx(pos.coords.latitude,pos.coords.longitude);
-    const k=it.kind+":"+it.id; posOv[k]={x:Math.round(x*10)/10,y:Math.round(y*10)/10,capturedAt:new Date().toISOString()};
+    const k=it.kind+":"+it.id;
+    posOv[k]={lat:pos.coords.latitude,lon:pos.coords.longitude,accuracy:pos.coords.accuracy||null,capturedAt:new Date().toISOString()};
     persistPosOv();
-    const m=markers[k]; if(m) m.setLatLng(LL(posOv[k].x,posOv[k].y));
-    toast("Position mise à jour"); refreshAll();
+    gpsInfoOpen=true;
+    toast("Position GPS précise enregistrée"); refreshAll();
   }, err=>{ toast(err.code===1?"Autorise la localisation pour capturer la position":"Position indisponible"); },
   {enableHighAccuracy:true,maximumAge:0,timeout:12000});
 }
@@ -400,6 +418,107 @@ function sc_m2px(){ // meters -> plan px, using local scale near map center
   const c=map.getCenter(); const [x,y]=llToPx(c.lat,c.lng);
   const [la1,lo1]=pxToLL(x+50,y), dl=(la1-c.lat)*111320, dg=(lo1-c.lng)*111320*Math.cos(c.lat*Math.PI/180);
   const mPerPx=Math.hypot(dl,dg)/50; return mPerPx>0 ? 1/mPerPx : 0.5;
+}
+
+/* ---------- Mode Calibrage: build a big, spread-out set of plan<->GPS correspondences ---------- */
+// ~50 target points, greedy farthest-point sampling over valve plan positions (well spread instead
+// of the original 6 putting-green-only reference points). Deterministic given the current valve set.
+function fpsSample(points,k){
+  if(points.length<=k) return points.slice();
+  const chosen=[points[0]], remaining=points.slice(1);
+  while(chosen.length<k && remaining.length){
+    let bestIdx=-1,bestD=-1;
+    for(let i=0;i<remaining.length;i++){
+      const p=remaining[i]; let dmin=Infinity;
+      for(const c of chosen){ const dx=p.x-c.x, dy=p.y-c.y, d=dx*dx+dy*dy; if(d<dmin) dmin=d; }
+      if(dmin>bestD){ bestD=dmin; bestIdx=i; }
+    }
+    chosen.push(remaining[bestIdx]); remaining.splice(bestIdx,1);
+  }
+  return chosen;
+}
+const CALIB_TARGETS=fpsSample(VAL.map(v=>({id:v.id,name:get(v,"name"),x:get(v,"x"),y:get(v,"y")})),50);
+const CALIBKEY="irrimap-calib";
+let calib=[]; try{ const raw=localStorage.getItem(CALIBKEY); if(raw) calib=JSON.parse(raw)||[]; }catch(e){}
+function persistCalib(){ try{ localStorage.setItem(CALIBKEY,JSON.stringify(calib)); }catch(e){} }
+function calibRemaining(){ const got=new Set(calib.map(c=>c.targetId)); return CALIB_TARGETS.filter(t=>!got.has(t.id)); }
+let calibMode=false, calibTarget=null;
+// least-squares affine fit (normal equations), generalizing the original 6-point closed form to N points:
+// lat=A0*x+A1*y+A2, lon=B0*x+B1*y+B2, each fit independently as ordinary linear regression.
+function solve3(M,b){
+  const det=m=>m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1])-m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0])+m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
+  const D=det(M); if(Math.abs(D)<1e-14) return null;
+  const repl=(M,col,vec)=>M.map((row,i)=>row.map((v,j)=>j===col?vec[i]:v));
+  return [det(repl(M,0,b))/D, det(repl(M,1,b))/D, det(repl(M,2,b))/D];
+}
+function fitAffine(pts){
+  if(pts.length<3) return null;
+  let Sxx=0,Sxy=0,Sx1=0,Syy=0,Sy1=0,S11=0,SxLat=0,SyLat=0,S1Lat=0,SxLon=0,SyLon=0,S1Lon=0;
+  pts.forEach(p=>{ const x=p.px,y=p.py;
+    Sxx+=x*x; Sxy+=x*y; Sx1+=x; Syy+=y*y; Sy1+=y; S11+=1;
+    SxLat+=x*p.lat; SyLat+=y*p.lat; S1Lat+=p.lat;
+    SxLon+=x*p.lon; SyLon+=y*p.lon; S1Lon+=p.lon; });
+  const M=[[Sxx,Sxy,Sx1],[Sxy,Syy,Sy1],[Sx1,Sy1,S11]];
+  const A=solve3(M,[SxLat,SyLat,S1Lat]), B=solve3(M,[SxLon,SyLon,S1Lon]);
+  return (A&&B) ? {A,B} : null;
+}
+function calibCapture(){
+  const t=calibTarget; if(!t) return;
+  if(!navigator.geolocation){ toast("Géolocalisation non disponible"); return; }
+  toast("Recherche du signal GPS…");
+  navigator.geolocation.getCurrentPosition(pos=>{
+    calib=calib.filter(c=>c.targetId!==t.id);
+    calib.push({targetId:t.id,name:t.name,px:t.x,py:t.y,lat:pos.coords.latitude,lon:pos.coords.longitude,ts:new Date().toISOString()});
+    persistCalib();
+    toast(t.name+" capturé");
+    calibTarget=null; updCalibBar(); redraw();
+    if(current==="profil") openCalibScreen();
+  }, err=>{ toast(err.code===1?"Autorise la localisation pour capturer":"Position indisponible"); },
+  {enableHighAccuracy:true,maximumAge:0,timeout:12000});
+}
+function updCalibBar(){
+  const bar=document.getElementById("calibbar"); if(!bar) return;
+  if(IS_TEAM_VERSION || !calibMode || !calibTarget){ bar.hidden=true; return; }
+  document.getElementById("calibtxt").innerHTML=`<b>Calibrage</b>Va sur ${esc(calibTarget.name)}, aligne le point bleu, puis capture`;
+  bar.hidden=false; const h=document.getElementById("hint"); if(h) h.hidden=true;
+}
+function calibHTML(){
+  const rem=calibRemaining(), done=calib.length, total=CALIB_TARGETS.length, canRecalc=done>=6;
+  return `<div class="screen"><div class="shead"><button class="back" id="calib-back" aria-label="Retour">${backIc}</button><div><h1>Calibrage GPS</h1><div class="sub">${done}/${total} points capturés</div></div></div>
+  <div class="rows">${rem.length ? rem.map(t=>`<button class="row" data-target="${esc(t.id)}"><span class="code">${esc(t.name)}</span><span class="meta">À capturer</span>${chev}</button>`).join("") : '<div class="row"><span class="meta">Tous les points sont capturés.</span></div>'}</div>
+  <button class="save" id="calib-recalc"${canRecalc?"":" disabled"}>Recalculer la calibration</button>
+  ${!canRecalc?`<p class="empty">Il faut au moins 6 points capturés pour recalculer (actuellement ${done}).</p>`:`<p class="empty">Remplace la calibration d’origine (6 points, greens uniquement) par une calibration calculée sur les ${done} points capturés.</p>`}
+  <button class="ghost" id="calib-reset" style="margin-top:4px">Réinitialiser le calibrage</button>
+  </div>`;
+}
+function openCalibScreen(){
+  const el=document.getElementById(views.profil);
+  el.innerHTML=calibHTML();
+  document.getElementById("calib-back").onclick=()=>render("profil");
+  el.querySelectorAll("[data-target]").forEach(b=>b.onclick=()=>{
+    const t=CALIB_TARGETS.find(x=>x.id===b.dataset.target); if(!t) return;
+    calibTarget=t; calibMode=true;
+    if(!geoActive) geoStart();
+    switchTab("map");
+    setTimeout(()=>{ map.invalidateSize(); map.flyTo(LL(t.x,t.y),Math.max(map.getZoom(),1.5),{duration:.6}); updCalibBar(); redraw(); },30);
+  });
+  const rc=document.getElementById("calib-recalc");
+  if(rc) rc.onclick=()=>{
+    if(calib.length<6) return;
+    const fit=fitAffine(calib);
+    if(!fit){ toast("Échec du calcul, réessaie"); return; }
+    geocal=fit; persistGeocal();
+    toast("Calibration recalculée ("+calib.length+" points)");
+    openCalibScreen(); redraw();
+  };
+  const rs=document.getElementById("calib-reset");
+  if(rs) rs.onclick=()=>{
+    ask([["Calibrage",null,"Effacer les points capturés et revenir à la calibration d’origine (6 points)"]],()=>{
+      calib=[]; persistCalib(); geocal=null; persistGeocal();
+      calibMode=false; calibTarget=null; updCalibBar(); redraw();
+      openCalibScreen();
+    },null,"Réinitialiser le calibrage ?","Calibrage réinitialisé");
+  };
 }
 
 const LabelCanvas=L.Canvas.extend({
@@ -479,6 +598,15 @@ function drawOverlay(ctx){
     if(ar>10){ ctx.fillStyle="rgba(31,155,215,.16)"; ctx.beginPath(); ctx.arc(p.x,p.y,ar,0,Math.PI*2); ctx.fill(); }
     ctx.fillStyle="#1f9bd7"; ctx.strokeStyle="#fff"; ctx.lineWidth=2.5;
     ctx.beginPath(); ctx.arc(p.x,p.y,8,0,Math.PI*2); ctx.fill(); ctx.stroke(); }
+  // calibration target pin (Mode calibrage) — distinct numbered purple pin
+  if(calibMode&&calibTarget){
+    const p=P(calibTarget.x,calibTarget.y), rr=Math.max(11,5.5*sc);
+    ctx.fillStyle="#8b5cf6"; ctx.strokeStyle="#fff"; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(p.x,p.y,rr,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    const lbl=calibTarget.name.replace(/^V/,"");
+    ctx.fillStyle="#fff"; ctx.font=`700 ${Math.max(9,Math.round(rr*0.85))}px "Barlow Condensed", system-ui, sans-serif`; ctx.textAlign="center";
+    ctx.fillText(lbl,p.x,p.y+1);
+  }
   ctx.restore();
 }
 function redraw(){ renderer._redrawBounds=null; if(renderer._ctx) renderer._redraw(); }
@@ -585,7 +713,7 @@ function endDrag(){
   suppressClick=true; setTimeout(()=>suppressClick=false,450);
   const moved=Math.hypot(d.x-d.x0,d.y-d.y0)>0.4;
   if(!moved){ drag=null; redraw(); return; }
-  ask([["Position",null,"Nouvel emplacement sur la carte"]],()=>{ drag=null; delete posOv[d.it.kind+":"+d.it.id]; persistPosOv(); markers[d.it.kind+":"+d.it.id].setLatLng(LL(d.x,d.y)); setFields(d.it,{x:d.x,y:d.y}); },
+  ask([["Position",null,"Nouvel emplacement sur la carte"]],()=>{ drag=null; markers[d.it.kind+":"+d.it.id].setLatLng(LL(d.x,d.y)); setFields(d.it,{x:d.x,y:d.y}); },
       ()=>{ drag=null; redraw(); }, "Déplacer "+get(d.it,"name")+" ici ?", "Arroseur déplacé");
 }
 mc.addEventListener("touchstart",e=>{ if(e.touches.length!==1){ cancelLP(); return; } startLP(cpOf(e)); },{passive:true});
@@ -604,6 +732,10 @@ const hint=document.getElementById("hint");
 map.once("zoomstart",()=>{hint.style.opacity=0;setTimeout(()=>hint.hidden=true,500);});
 setTimeout(()=>{hint.style.opacity=0;setTimeout(()=>hint.hidden=true,500);},7000);
 document.getElementById("simreset").onclick=()=>{ simClosed=[]; recomputeSim(); toast("Toutes les vannes sont rouvertes"); };
+if(!IS_TEAM_VERSION){
+  document.getElementById("calib-capture").onclick=calibCapture;
+  document.getElementById("calib-exit").onclick=()=>{ calibMode=false; calibTarget=null; updCalibBar(); redraw(); };
+}
 function fitItems(items){ const pts=items.map(it=>{const q=posOf(it); return LL(q.x,q.y);}); if(!pts.length) return;
   if(pts.length===1) map.flyTo(pts[0],Math.max(map.getZoom(),1.25),{duration:.6}); else map.flyToBounds(L.latLngBounds(pts).pad(0.25),{maxZoom:1.5,duration:.6}); }
 function updStat(){ const n=ALL.filter(hasObs).length;
@@ -682,10 +814,11 @@ function profilTeamHTML(){
   <p class="empty">Réunit toutes les observations texte enregistrées sur ce téléphone et ouvre un SMS pré-rempli vers Stev.</p></div>`;
 }
 function profilDevHTML(){
-  return `<div class="screen"><div class="shead"><div><h1>Profil</h1><div class="sub">Import / partage</div></div></div>
+  return `<div class="screen"><div class="shead"><div><h1>Profil</h1><div class="sub">Import / partage / calibrage</div></div></div>
   <div class="rows">
     <button class="row" id="b-import"><span class="meta">Importer des observations reçues</span>${chev}</button>
     <button class="row" id="b-partager"><span class="meta">Partager le lien équipe</span>${chev}</button>
+    <button class="row" id="b-calib"><span class="meta">Mode calibrage GPS · ${calib.length}/${CALIB_TARGETS.length} points</span>${chev}</button>
   </div></div>`;
 }
 function buildExportText(){
@@ -737,6 +870,7 @@ function wireProfil(){
   const be=document.getElementById("b-export"); if(be) be.onclick=doExport;
   const bi=document.getElementById("b-import"); if(bi) bi.onclick=openImportForm;
   const bp=document.getElementById("b-partager"); if(bp) bp.onclick=doPartager;
+  const bc=document.getElementById("b-calib"); if(bc) bc.onclick=openCalibScreen;
 }
 function render(tab){
   const el=document.getElementById(views[tab]); const top=el.scrollTop;
@@ -786,7 +920,7 @@ function subtitle(it){
   if(it.kind==="v"){ const r=overrideOf[it.id]; if(!r) return it.type; const c=(r.cv&&r.cv[it.id])||r.c; return it.type.startsWith("Clapet") ? c : `${c} · ${it.type}`; }
   return `${COURSES[it.course].t} · ${holeLabel(it.hole)} · ${CAT[it.cat]}`;
 }
-let draftTxt="", draftPh=[];
+let draftTxt="", draftPh=[], gpsInfoOpen=false;
 function sectHTML(it){
   if(it.kind==="v"){
     if(it.type.startsWith("Clapet") && !overrideOf[it.id]) return "";
@@ -826,7 +960,7 @@ const viewer=document.getElementById("viewer");
 function viewPhoto(u){ viewer.innerHTML=`<img src="${u}" alt="Photo de l’observation">`; viewer.hidden=false; }
 viewer.onclick=()=>{ viewer.hidden=true; viewer.innerHTML=""; };
 function openSheet(it){
-  if(open!==it){ draftTxt=""; draftPh=[]; }
+  if(open!==it){ draftTxt=""; draftPh=[]; gpsInfoOpen=false; }
   open=it; if(current==="map"){ selected=it; redraw(); }
   renderSheet();
   scrim.hidden=false; sheet.hidden=false;
@@ -859,11 +993,23 @@ function renderSheet(){
     <div class="inl">${IS_TEAM_VERSION?"":'<label class="photo-btn" id="b-photo" for="f-photo" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Photo</label>'}<button class="save" id="s-obs" style="flex:1" disabled>Ajouter</button></div>
     <div class="obsline">${hasObs(it)?'<i></i> Point rouge affiché sur la carte':'Une observation ajoute un point rouge sur la carte'}</div></div>
   <button class="ghost" id="sh-map"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21Z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Voir sur la carte</button>
-  ${!IS_TEAM_VERSION?`<button class="ghost" id="sh-geo" style="margin-top:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>Géoloc${posOv[it.kind+":"+it.id]?" (position capturée)":""}</button>`:""}`;
+  ${!IS_TEAM_VERSION?(()=>{
+      const gp=gpsCapture(it);
+      let h=`<button class="ghost" id="sh-geo" style="margin-top:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>${gp?"Recapturer la position GPS précise":"Capturer la position GPS précise"}</button>`;
+      if(gp){
+        h+=`<button class="ghost" id="sh-gpsinfo" style="margin-top:8px">${gpsInfoOpen?"Masquer":"Voir"} la position GPS précise</button>`;
+        if(gpsInfoOpen){
+          const off=gpsOffsetM(it,gp);
+          h+=`<div class="obsline" style="margin-top:8px;align-items:flex-start">📍 ${gp.lat.toFixed(6)}, ${gp.lon.toFixed(6)} · capturé le ${fmtD(gp.capturedAt)} · écart ≈ ${off.toFixed(1)} m avec la position sur le plan</div>`;
+        }
+      }
+      return h;
+    })():""}`;
   const $=id=>document.getElementById(id);
   $("sh-x").onclick=closeSheet;
   $("sh-map").onclick=()=>{ const x=open; closeSheet(); showOnMap(x); };
   const shg=$("sh-geo"); if(shg) shg.onclick=()=>geoCaptureFor(it);
+  const sgi=$("sh-gpsinfo"); if(sgi) sgi.onclick=()=>{ gpsInfoOpen=!gpsInfoOpen; renderSheet(); };
   const nm=$("f-name"), sn=$("s-name");
   if(nm&&sn){
     nm.oninput=()=>{ sn.hidden = nm.value.trim()===get(it,"name") || !nm.value.trim(); };
