@@ -421,8 +421,9 @@ function sc_m2px(){ // meters -> plan px, using local scale near map center
 }
 
 /* ---------- Mode Calibrage: build a big, spread-out set of plan<->GPS correspondences ---------- */
-// ~50 target points, greedy farthest-point sampling over valve plan positions (well spread instead
-// of the original 6 putting-green-only reference points). Deterministic given the current valve set.
+// Target points = every green center (precise, findable, fixed spots — one per hole on each course)
+// plus a spread-out subset of tee/departure centers (greedy farthest-point sampling) to fill gaps
+// greens alone leave in spatial coverage. Deterministic given the current sprinkler set.
 function fpsSample(points,k){
   if(points.length<=k) return points.slice();
   const chosen=[points[0]], remaining=points.slice(1);
@@ -437,11 +438,34 @@ function fpsSample(points,k){
   }
   return chosen;
 }
-const CALIB_TARGETS=fpsSample(VAL.map(v=>({id:v.id,name:get(v,"name"),x:get(v,"x"),y:get(v,"y")})),50);
+// group a sprinkler category ('G'=green, 'T'=départ) into one centroid per (course,hole)
+function catCenters(cat,label){
+  const groups={};
+  SPR.forEach(s=>{
+    if(s.cat!==cat || s.hole===19) return;
+    const k=s.course+":"+s.hole;
+    (groups[k]=groups[k]||{course:s.course,hole:s.hole,xs:[],ys:[]});
+    groups[k].xs.push(s.x); groups[k].ys.push(s.y);
+  });
+  return Object.values(groups).map(g=>({
+    id:"cal-"+label[0]+"-"+g.course+"-"+g.hole,
+    name:`${label} trou ${g.hole} (${g.course} trous)`,
+    course:g.course, hole:g.hole,
+    x:g.xs.reduce((a,b)=>a+b,0)/g.xs.length,
+    y:g.ys.reduce((a,b)=>a+b,0)/g.ys.length
+  }));
+}
+const GREEN_TARGETS=catCenters("G","Green").sort((a,b)=>(a.course===b.course?0:(a.course<b.course?-1:1))||a.hole-b.hole);
+const TEE_CANDIDATES=catCenters("T","Départ").sort((a,b)=>(a.course===b.course?0:(a.course<b.course?-1:1))||a.hole-b.hole);
+const TEE_TARGETS=fpsSample(TEE_CANDIDATES,18);
+const CALIB_TARGETS=GREEN_TARGETS.concat(TEE_TARGETS);
 const CALIBKEY="irrimap-calib";
 let calib=[]; try{ const raw=localStorage.getItem(CALIBKEY); if(raw) calib=JSON.parse(raw)||[]; }catch(e){}
 function persistCalib(){ try{ localStorage.setItem(CALIBKEY,JSON.stringify(calib)); }catch(e){} }
 function calibRemaining(){ const got=new Set(calib.map(c=>c.targetId)); return CALIB_TARGETS.filter(t=>!got.has(t.id)); }
+// captured entries left over from an older target set (e.g. before this point list was rebuilt) —
+// ignored for progress/checklist counts so they don't inflate "done" against the current targets.
+function calibValid(){ const ids=new Set(CALIB_TARGETS.map(t=>t.id)); return calib.filter(c=>ids.has(c.targetId)); }
 let calibMode=false, calibTarget=null;
 // least-squares affine fit (normal equations), generalizing the original 6-point closed form to N points:
 // lat=A0*x+A1*y+A2, lon=B0*x+B1*y+B2, each fit independently as ordinary linear regression.
@@ -483,7 +507,7 @@ function updCalibBar(){
   bar.hidden=false; const h=document.getElementById("hint"); if(h) h.hidden=true;
 }
 function calibHTML(){
-  const rem=calibRemaining(), done=calib.length, total=CALIB_TARGETS.length, canRecalc=done>=6;
+  const rem=calibRemaining(), done=calibValid().length, total=CALIB_TARGETS.length, canRecalc=done>=6;
   return `<div class="screen"><div class="shead"><button class="back" id="calib-back" aria-label="Retour">${backIc}</button><div><h1>Calibrage GPS</h1><div class="sub">${done}/${total} points capturés</div></div></div>
   <div class="rows">${rem.length ? rem.map(t=>`<button class="row" data-target="${esc(t.id)}"><span class="code">${esc(t.name)}</span><span class="meta">À capturer</span>${chev}</button>`).join("") : '<div class="row"><span class="meta">Tous les points sont capturés.</span></div>'}</div>
   <button class="save" id="calib-recalc"${canRecalc?"":" disabled"}>Recalculer la calibration</button>
@@ -818,7 +842,7 @@ function profilDevHTML(){
   <div class="rows">
     <button class="row" id="b-import"><span class="meta">Importer des observations reçues</span>${chev}</button>
     <button class="row" id="b-partager"><span class="meta">Partager le lien équipe</span>${chev}</button>
-    <button class="row" id="b-calib"><span class="meta">Mode calibrage GPS · ${calib.length}/${CALIB_TARGETS.length} points</span>${chev}</button>
+    <button class="row" id="b-calib"><span class="meta">Mode calibrage GPS · ${calibValid().length}/${CALIB_TARGETS.length} points</span>${chev}</button>
   </div></div>`;
 }
 function buildExportText(){
