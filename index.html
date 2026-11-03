@@ -214,7 +214,7 @@ textarea.ctl{min-height:84px;resize:vertical;line-height:1.4}
       </div>
       <div class="hint" id="hint">Zoome pour voir les numéros · touche un arroseur ou une vanne · appui long pour le déplacer</div>
       <div class="dragchip" id="dragchip" hidden>Glisse puis relâche</div>
-      <div class="simbar" id="simbar" hidden><div id="simtxt"></div><button id="simreset">Tout rouvrir</button></div>
+      <div class="simbar" id="simbar" hidden><div id="simtxt"></div><button id="simreset">Tout rouvrir</button></div><button class="testbtn" id="testbtn">Tests fuites</button><div class="testpanel" id="testpanel" hidden></div>
       <div class="simbar calib" id="calibbar" hidden><div id="calibtxt"></div><button id="calib-capture">Capturer</button><button id="calib-exit" aria-label="Quitter le calibrage">✕</button></div>
     </section>
     <section class="view" id="v-holes" hidden></section>
@@ -716,7 +716,7 @@ let suppressClick=false;
 [...VAL,...SPR].forEach(it=>{
   const p0=basePos(it);
   markers[it.kind+":"+it.id]=L.circleMarker(LL(p0.x,p0.y),{radius:10,stroke:false,fill:true,fillOpacity:0,renderer})
-   .on("click",e=>{ L.DomEvent.stop(e); if(suppressClick) return; openSheet(it); }).addTo(map);
+   .on("click",e=>{ L.DomEvent.stop(e); if(suppressClick) return; if(testMode&&activeLeak&&it.kind==="v"){ toggleTestValve(it); return; } openSheet(it); }).addTo(map);
 });
 // leak marker hit-targets (tap to remove) — full version only
 const leakMarkers={};
@@ -1284,7 +1284,60 @@ function renderSheet(){
   }
 }
 
-/* ---------- validation bubble ---------- */
+
+/* ---------- banc de test des fuites ---------- */
+const TESTKEY="irrimap-leak-tests-v1";
+let testMode=false, activeLeak=null, testCases=[];
+try{ testCases=JSON.parse(localStorage.getItem(TESTKEY)||"[]"); }catch(e){ testCases=[]; }
+function seedTests(){
+  if(testCases.length) return;
+  const n=50, step=Math.max(1,Math.floor(SPR.length/n));
+  for(let i=0;i<n;i++){
+    const sp=SPR[Math.min(SPR.length-1,i*step)], q=posOf(sp);
+    const a=(i%8)*Math.PI/4, r=12+(i%3)*4;
+    testCases.push({id:"F"+String(i+1).padStart(2,"0"),x:+(q.x+Math.cos(a)*r).toFixed(1),y:+(q.y+Math.sin(a)*r).toFixed(1),valves:[],done:false});
+  }
+  saveTests();
+}
+function saveTests(){ try{localStorage.setItem(TESTKEY,JSON.stringify(testCases));}catch(e){} }
+const leakLayer=L.layerGroup().addTo(map);
+function renderLeaks(){
+  leakLayer.clearLayers(); if(!testMode) return;
+  testCases.forEach(c=>{
+    const active=activeLeak&&activeLeak.id===c.id;
+    const m=L.circleMarker(LL(c.x,c.y),{radius:active?10:7,color:"#fff",weight:2,fillColor:c.done?"#1d6b45":"#d92d27",fillOpacity:1});
+    m.bindTooltip(c.id+(c.done?" ✓":""),{direction:"top",offset:[0,-5]});
+    m.on("click",e=>{L.DomEvent.stop(e);activeLeak=c;renderLeaks();renderTestPanel();fitItems([{x:c.x,y:c.y,kind:"x",id:c.id}]);});
+    m.addTo(leakLayer);
+  });
+}
+function toggleTestValve(v){
+  if(!activeLeak) return;
+  const i=activeLeak.valves.indexOf(v.id); if(i>=0) activeLeak.valves.splice(i,1); else activeLeak.valves.push(v.id);
+  saveTests(); renderTestPanel(); redraw(); toast((i>=0?"Retirée : ":"Ajoutée : ")+get(v,"name"));
+}
+function renderTestPanel(){
+  const p=document.getElementById("testpanel"); if(!testMode){p.hidden=true;return;}
+  const done=testCases.filter(c=>c.done).length;
+  if(!activeLeak){p.innerHTML=`<b>Banc de test · ${done}/${testCases.length} validés</b><small>Touche un point rouge de fuite fictive, puis sélectionne les vannes à fermer.</small><div class="row"><button id="tclose">Quitter</button></div>`;}
+  else{
+    const names=activeLeak.valves.map(id=>byId["v:"+id]).filter(Boolean).map(v=>get(v,"name"));
+    p.innerHTML=`<b>${activeLeak.id} · ${activeLeak.done?"validé":"à valider"}</b><small>Vannes terrain : ${names.length?esc(names.join(", ")):"aucune sélectionnée"}. Touche directement les vannes sur la carte pour les ajouter/retirer.</small><div class="row"><button id="tback">Autre fuite</button><button class="primary" id="tvalid">${activeLeak.done?"Mettre à jour":"Valider ce cas"}</button></div>`;
+  }
+  p.hidden=false;
+  const q=id=>document.getElementById(id);
+  if(q("tclose"))q("tclose").onclick=toggleTestMode;
+  if(q("tback"))q("tback").onclick=()=>{activeLeak=null;renderLeaks();renderTestPanel();};
+  if(q("tvalid"))q("tvalid").onclick=()=>{if(!activeLeak.valves.length){toast("Sélectionne au moins une vanne");return;}activeLeak.done=true;saveTests();renderLeaks();renderTestPanel();toast("Cas terrain enregistré");};
+}
+function toggleTestMode(){
+  testMode=!testMode; activeLeak=null; seedTests();
+  document.getElementById("testbtn").textContent=testMode?"Quitter tests":"Tests fuites";
+  renderLeaks(); renderTestPanel();
+  if(testMode){switchTab("map");map.fitBounds(bounds,{padding:[6,6]});toast("50 fuites fictives chargées");}
+}
+document.getElementById("testbtn").onclick=toggleTestMode;
+\n/* ---------- validation bubble ---------- */
 const cf=document.getElementById("confirm");
 function ask(changes,onYes,onNo,title,done){
   cf.innerHTML=`<div class="bubble" role="alertdialog" aria-labelledby="cf-t"><h4 id="cf-t">${esc(title||"Valider la modification ?")}</h4>
