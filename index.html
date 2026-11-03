@@ -309,6 +309,12 @@ function gpsOffsetM(it,o){ const [la,lo]=pxToLL(get(it,"x"),get(it,"y")); const 
 const LEAKKEY="irrimap-leaks";
 let leaks=[]; try{ const raw=localStorage.getItem(LEAKKEY); if(raw) leaks=JSON.parse(raw)||[]; }catch(e){}
 function persistLeaks(){ try{ localStorage.setItem(LEAKKEY,JSON.stringify(leaks)); }catch(e){} }
+// Typage manuel des tronçons de canalisation. La clé est le nœud NET : par construction,
+// un nœud représente une portion de réseau continue comprise entre les vannes du graphe.
+const PIPETYPEKEY="irrimap-pipe-types-v1";
+const PIPE_TYPES=["Primaire","Secondaire","Fairway","Green","Départ","Problème"];
+let pipeTypes={}; try{ const raw=localStorage.getItem(PIPETYPEKEY); if(raw) pipeTypes=JSON.parse(raw)||{}; }catch(e){}
+function persistPipeTypes(){ try{ localStorage.setItem(PIPETYPEKEY,JSON.stringify(pipeTypes)); }catch(e){} }
 // "Zone sèche" — free-form running list of dry-patch reports (Opération tab, dev/full version only)
 const ZSKEY="irrimap-zonesech";
 let zoneSech=[]; try{ const raw=localStorage.getItem(ZSKEY); if(raw) zoneSech=JSON.parse(raw)||[]; }catch(e){}
@@ -706,6 +712,17 @@ function drawOverlay(ctx){
     ctx.fillStyle="#fff"; ctx.font=`700 ${Math.max(9,Math.round(rr*0.85))}px "Barlow Condensed", system-ui, sans-serif`; ctx.textAlign="center";
     ctx.fillText(lbl,p.x,p.y+1);
   }
+  // Prévisualisation du tronçon sélectionné pour le typage réseau.
+  // NET.pp contient des points denses du plan associés à leur nœud de réseau.
+  if(pipeCtx && pipeCtx.node!==undefined && NET.pp){
+    ctx.fillStyle="rgba(255,193,7,.88)";
+    const rr=Math.max(3,4.2*sc);
+    for(const q of NET.pp){
+      if(q[2]!==pipeCtx.node) continue;
+      const p=P(q[0],q[1]);
+      ctx.beginPath(); ctx.arc(p.x,p.y,rr,0,Math.PI*2); ctx.fill();
+    }
+  }
   ctx.restore();
 }
 function redraw(){ renderer._redrawBounds=null; if(renderer._ctx) renderer._redraw(); }
@@ -767,12 +784,25 @@ function renderPipeSheet(){
       : `<p>Aucune vanne trouvée près de ce point.</p>`;
   }
   const near=leaks.filter(l=>Math.hypot(l.x-cx,l.y-cy)<25);
+  const curType=pipeTypes[node]||"";
+  const typeOptions=['<option value="">Choisir…</option>'].concat(PIPE_TYPES.map(t=>`<option value="${esc(t)}"${t===curType?" selected":""}>${esc(t)}</option>`)).join("");
   sheet.innerHTML=`<div class="grab"></div>
-  <div class="shtop"><div><h3 id="sh-title">Canalisation</h3><p>Point sur le réseau de tuyaux</p></div>
+  <div class="shtop"><div><h3 id="sh-title">Canalisation</h3><p>Tronçon en surbrillance · de vanne à vanne</p></div>
     <button class="x" id="sh-x" aria-label="Fermer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-  <div class="field"><label>Secteur</label><div class="sect">${body}</div></div>
+  ${!IS_TEAM_VERSION?`<div class="field"><label>Type de canalisation</label><select class="ctl" id="pipe-type">${typeOptions}</select></div>
+  <button class="save" id="pipe-type-save">Enregistrer le type</button>
+  <p class="empty" style="margin-top:8px">Si la surbrillance n’est pas correcte, choisis « Problème ». Le tronçon sera conservé pour correction sans lui attribuer un faux type.</p>`:""}
+  <div class="field"><label>Isolement actuel</label><div class="sect">${body}</div></div>
   ${!IS_TEAM_VERSION?`<button class="ghost" id="b-leak"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17h.01"/></svg>${near.length?"Retirer la fuite signalée ici":"Signaler une fuite ici"}</button>`:""}`;
   document.getElementById("sh-x").onclick=closeSheet;
+  const pts=document.getElementById("pipe-type-save");
+  if(pts) pts.onclick=()=>{
+    const t=document.getElementById("pipe-type").value;
+    if(!t){ toast("Choisis un type de canalisation"); return; }
+    pipeTypes[node]=t; persistPipeTypes();
+    toast(t==="Problème"?"Tronçon marqué Problème":"Tronçon classé : "+t);
+    closeSheet();
+  };
   sheet.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>openSheet(byId[b.dataset.open]));
   const bl=document.getElementById("b-leak");
   if(bl) bl.onclick=()=>{
@@ -1038,6 +1068,7 @@ function profilDevHTML(){
     <button class="row" id="b-import"><span class="meta">Importer des observations reçues</span>${chev}</button>
     <button class="row" id="b-partager"><span class="meta">Partager le lien équipe</span>${chev}</button>
     <button class="row" id="b-calib"><span class="meta">Mode calibrage GPS · ${calibValid().length}/${CALIB_TARGETS.length} points</span>${chev}</button>
+    <button class="row" id="b-pipe-export"><span class="meta">Partager le typage réseau · ${Object.keys(pipeTypes).length} tronçon${Object.keys(pipeTypes).length>1?"s":""}</span>${chev}</button>
   </div></div>`;
 }
 function buildExportText(){
@@ -1078,6 +1109,14 @@ function openImportForm(){
   document.getElementById("imp-back").onclick=()=>render("profil");
   document.getElementById("imp-go").onclick=()=>{ const r=doImport(document.getElementById("imp-txt").value); toast(r); render("profil"); };
 }
+async function doPipeTypeExport(){
+  const rows=Object.keys(pipeTypes).sort((a,b)=>(+a)-(+b)).map(n=>"N"+n+"|"+pipeTypes[n]);
+  const problems=rows.filter(r=>r.endsWith("|Problème")).length;
+  const txt=["IRRIMAP_RESEAU_V1","Tronçons="+rows.length,"Problemes="+problems,...rows].join("\n");
+  if(navigator.share){ try{ await navigator.share({text:txt}); return; }catch(e){ if(e&&e.name==="AbortError") return; } }
+  if(navigator.clipboard&&navigator.clipboard.writeText){ try{ await navigator.clipboard.writeText(txt); toast("Typage réseau copié"); return; }catch(e){} }
+  location.href="sms:?body="+encodeURIComponent(txt);
+}
 async function doPartager(){
   const url="https://steven210793.github.io/IrriMap/equipe/";
   const msg="Voici le lien de l’app IrriMap pour l’équipe : "+url;
@@ -1090,6 +1129,7 @@ function wireProfil(){
   const bi=document.getElementById("b-import"); if(bi) bi.onclick=openImportForm;
   const bp=document.getElementById("b-partager"); if(bp) bp.onclick=doPartager;
   const bc=document.getElementById("b-calib"); if(bc) bc.onclick=openCalibScreen;
+  const bpe=document.getElementById("b-pipe-export"); if(bpe) bpe.onclick=doPipeTypeExport;
 }
 function render(tab){
   const el=document.getElementById(views[tab]); const top=el.scrollTop;
@@ -1205,6 +1245,7 @@ function openSheet(it){
 function closeSheet(){
   scrim.classList.remove("on"); sheet.classList.remove("on");
   setTimeout(()=>{scrim.hidden=true;sheet.hidden=true;},220); open=null;
+  if(typeof pipeCtx!=="undefined" && pipeCtx){ pipeCtx=null; redraw(); }
 }
 scrim.onclick=closeSheet;
 function opts(list,val){ return list.map(o=>`<option${o===val?" selected":""}>${esc(o)}</option>`).join(""); }
