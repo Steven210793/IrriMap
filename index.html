@@ -309,6 +309,12 @@ function gpsOffsetM(it,o){ const [la,lo]=pxToLL(get(it,"x"),get(it,"y")); const 
 const LEAKKEY="irrimap-leaks";
 let leaks=[]; try{ const raw=localStorage.getItem(LEAKKEY); if(raw) leaks=JSON.parse(raw)||[]; }catch(e){}
 function persistLeaks(){ try{ localStorage.setItem(LEAKKEY,JSON.stringify(leaks)); }catch(e){} }
+// Typage manuel des tronçons de canalisation. La clé est le nœud NET : par construction,
+// un nœud représente une portion de réseau continue comprise entre les vannes du graphe.
+const PIPETYPEKEY="irrimap-pipe-types-v1";
+const PIPE_TYPES=["Primaire","Secondaire","Fairway","Green","Départ","Problème"];
+let pipeTypes={}; try{ const raw=localStorage.getItem(PIPETYPEKEY); if(raw) pipeTypes=JSON.parse(raw)||{}; }catch(e){}
+function persistPipeTypes(){ try{ localStorage.setItem(PIPETYPEKEY,JSON.stringify(pipeTypes)); }catch(e){} }
 // "Zone sèche" — free-form running list of dry-patch reports (Opération tab, dev/full version only)
 const ZSKEY="irrimap-zonesech";
 let zoneSech=[]; try{ const raw=localStorage.getItem(ZSKEY); if(raw) zoneSech=JSON.parse(raw)||[]; }catch(e){}
@@ -675,7 +681,18 @@ function drawOverlay(ctx){
       ctx.beginPath(); ctx.moveTo(0,-tr); ctx.lineTo(tr*0.87,tr*0.6); ctx.lineTo(-tr*0.87,tr*0.6); ctx.closePath();
       ctx.fillStyle="#ffcc00"; ctx.fill(); ctx.lineWidth=Math.max(1.5,tr*0.12); ctx.strokeStyle="#1b1206"; ctx.stroke();
       ctx.fillStyle="#1b1206"; ctx.font=`700 ${Math.round(tr*0.95)}px "Barlow Condensed", system-ui, sans-serif`; ctx.textAlign="center"; ctx.fillText("!",0,tr*0.32);
-      ctx.restore(); }); }
+      // Prévisualisation du tronçon sélectionné pour le typage réseau.
+  // NET.pp contient des points denses du plan associés à leur nœud de réseau.
+  if(pipeCtx && pipeCtx.node!==undefined && NET.pp){
+    ctx.fillStyle="rgba(255,193,7,.88)";
+    const rr=Math.max(3,4.2*sc);
+    for(const q of NET.pp){
+      if(q[2]!==pipeCtx.node) continue;
+      const p=P(q[0],q[1]);
+      ctx.beginPath(); ctx.arc(p.x,p.y,rr,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore(); }); }
   // selection ring
   if(simClosed.length){
     const rr=Math.max(7,Math.min(3.6*sc,14));
@@ -767,12 +784,25 @@ function renderPipeSheet(){
       : `<p>Aucune vanne trouvée près de ce point.</p>`;
   }
   const near=leaks.filter(l=>Math.hypot(l.x-cx,l.y-cy)<25);
+  const curType=pipeTypes[node]||"";
+  const typeOptions=['<option value="">Choisir…</option>'].concat(PIPE_TYPES.map(t=>`<option value="${esc(t)}"${t===curType?" selected":""}>${esc(t)}</option>`)).join("");
   sheet.innerHTML=`<div class="grab"></div>
-  <div class="shtop"><div><h3 id="sh-title">Canalisation</h3><p>Point sur le réseau de tuyaux</p></div>
+  <div class="shtop"><div><h3 id="sh-title">Canalisation</h3><p>Tronçon en surbrillance · de vanne à vanne</p></div>
     <button class="x" id="sh-x" aria-label="Fermer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-  <div class="field"><label>Secteur</label><div class="sect">${body}</div></div>
+  ${!IS_TEAM_VERSION?`<div class="field"><label>Type de canalisation</label><select class="ctl" id="pipe-type">${typeOptions}</select></div>
+  <button class="save" id="pipe-type-save">Enregistrer le type</button>
+  <p class="empty" style="margin-top:8px">Si la surbrillance n’est pas correcte, choisis « Problème ». Le tronçon sera conservé pour correction sans lui attribuer un faux type.</p>`:""}
+  <div class="field"><label>Isolement actuel</label><div class="sect">${body}</div></div>
   ${!IS_TEAM_VERSION?`<button class="ghost" id="b-leak"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17h.01"/></svg>${near.length?"Retirer la fuite signalée ici":"Signaler une fuite ici"}</button>`:""}`;
   document.getElementById("sh-x").onclick=closeSheet;
+  const pts=document.getElementById("pipe-type-save");
+  if(pts) pts.onclick=()=>{
+    const t=document.getElementById("pipe-type").value;
+    if(!t){ toast("Choisis un type de canalisation"); return; }
+    pipeTypes[node]=t; persistPipeTypes();
+    toast(t==="Problème"?"Tronçon marqué Problème":"Tronçon classé : "+t);
+    closeSheet();
+  };
   sheet.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>openSheet(byId[b.dataset.open]));
   const bl=document.getElementById("b-leak");
   if(bl) bl.onclick=()=>{
