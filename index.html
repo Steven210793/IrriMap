@@ -681,8 +681,8 @@ function drawOverlay(ctx){
       ctx.beginPath(); ctx.moveTo(0,-tr); ctx.lineTo(tr*0.87,tr*0.6); ctx.lineTo(-tr*0.87,tr*0.6); ctx.closePath();
       ctx.fillStyle="#ffcc00"; ctx.fill(); ctx.lineWidth=Math.max(1.5,tr*0.12); ctx.strokeStyle="#1b1206"; ctx.stroke();
       ctx.fillStyle="#1b1206"; ctx.font=`700 ${Math.round(tr*0.95)}px "Barlow Condensed", system-ui, sans-serif`; ctx.textAlign="center"; ctx.fillText("!",0,tr*0.32);
-      // Prévisualisation du tronçon sélectionné pour le typage réseau.
-  // NET.pp contient des points denses du plan associés à leur nœud de réseau.
+      ctx.restore(); }); }
+  // Prévisualisation du tronçon sélectionné pour le typage réseau.
   if(pipeCtx && pipeCtx.node!==undefined && NET.pp){
     ctx.fillStyle="rgba(255,193,7,.88)";
     const rr=Math.max(3,4.2*sc);
@@ -692,7 +692,6 @@ function drawOverlay(ctx){
       ctx.beginPath(); ctx.arc(p.x,p.y,rr,0,Math.PI*2); ctx.fill();
     }
   }
-  ctx.restore(); }); }
   // selection ring
   if(simClosed.length){
     const rr=Math.max(7,Math.min(3.6*sc,14));
@@ -755,7 +754,7 @@ function tryPipeClick(ll){
   if(!NET.pp || !NET.pp.length) return false;
   const plan_x=ll.lng, plan_y=-ll.lat;
   const sc=Math.pow(2,map.getZoom());
-  const tolPlan=16/sc;
+  const tolPlan=30/sc;
   let best=null,bd=tolPlan*tolPlan;
   for(const p of NET.pp){ const dx=p[0]-plan_x, dy=p[1]-plan_y, dd=dx*dx+dy*dy; if(dd<bd){bd=dd;best=p;} }
   if(!best) return false;
